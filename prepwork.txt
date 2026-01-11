@@ -1,0 +1,104 @@
+server:
+  port: 8082
+
+spring:
+  kafka:
+    bootstrap-servers: localhost:9092,localhost:9093,localhost:9094
+    streams:
+      application-id: market-state-service
+      properties:
+        processing.guarantee: exactly_once_v2
+    consumer:
+      auto-offset-reset: earliest
+---------
+
+public class PriceEvent {
+
+    private String s;   // symbol
+    private String c;   // price
+    private long E;     // event time
+
+    // getters & setters
+}
+----------
+
+@Configuration
+@EnableKafkaStreams
+public class MarketStateTopology {
+
+    public static final String STORE_NAME = "latest-price-store";
+
+    @Bean
+    public KStream<String, PriceEvent> kStream(StreamsBuilder builder) {
+
+        KStream<String, PriceEvent> stream =
+                builder.stream(
+                        "market.prices.raw",
+                        Consumed.with(
+                                Serdes.String(),
+                                new JsonSerde<>(PriceEvent.class)
+                        )
+                );
+
+        stream
+            .groupByKey()
+            .reduce(
+                (oldValue, newValue) -> newValue,
+                Materialized.<String, PriceEvent, KeyValueStore<Bytes, byte[]>>as(STORE_NAME)
+                        .withKeySerde(Serdes.String())
+                        .withValueSerde(new JsonSerde<>(PriceEvent.class))
+            );
+
+        return stream;
+    }
+}
+
+---------------------
+
+@Component
+public class PriceStore {
+
+    private final KafkaStreams kafkaStreams;
+
+    public PriceStore(KafkaStreams kafkaStreams) {
+        this.kafkaStreams = kafkaStreams;
+    }
+
+    public PriceEvent getLatestPrice(String symbol) {
+
+        ReadOnlyKeyValueStore<String, PriceEvent> store =
+                kafkaStreams.store(
+                        StoreQueryParameters.fromNameAndType(
+                                MarketStateTopology.STORE_NAME,
+                                QueryableStoreTypes.keyValueStore()
+                        )
+                );
+
+        return store.get(symbol);
+    }
+}
+--------------
+
+@RestController
+@RequestMapping("/price")
+public class PriceQueryController {
+
+    private final PriceStore priceStore;
+
+    public PriceQueryController(PriceStore priceStore) {
+        this.priceStore = priceStore;
+    }
+
+    @GetMapping("/{symbol}")
+    public ResponseEntity<?> getPrice(@PathVariable String symbol) {
+
+        PriceEvent event = priceStore.getLatestPrice(symbol);
+
+        if (event == null) {
+            return ResponseEntity.notFound().build();
+        }
+
+        return ResponseEntity.ok(event);
+    }
+}
+----------------------
